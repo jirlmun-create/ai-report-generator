@@ -1,169 +1,204 @@
-import { GoogleGenAI, Type, Chat, GenerateContentResponse } from "@google/genai";
+import { GoogleGenAI, Chat, Type } from "@google/genai";
 import { GuidelineFile, ReportData } from '../types';
 
-// Per guidelines: Always use `const ai = new GoogleGenAI({apiKey: process.env.API_KEY});`.
-// The API key MUST be obtained exclusively from the environment variable `process.env.API_KEY`.
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+// This file was created to implement the Gemini API service, resolving module not found errors.
+// It provides functions to generate a report from documents and to chat about the report.
 
-// Schema for the report data, matching the ReportData interface in types.ts
-const reportSchema = {
-    type: Type.OBJECT,
-    properties: {
-        basicInfo: {
-            type: Type.OBJECT,
-            properties: {
-                name: { type: Type.STRING, description: "수급자 성명" },
-                dob: { type: Type.STRING, description: "수급자 생년월일 (YYYY-MM-DD)" },
-                gender: { type: Type.STRING, description: "수급자 성별 (남/여)" },
-                admissionDate: { type: Type.STRING, description: "입소일 (YYYY-MM-DD)" },
-                dischargeDate: { type: Type.STRING, description: "퇴소일 (YYYY-MM-DD), 없으면 null" },
-                evaluationPeriod: { type: Type.STRING, description: "평가 기간 (YYYY-MM-DD ~ YYYY-MM-DD)" },
-                facilityName: { type: Type.STRING, description: "시설명" },
-            },
-            required: ['name', 'dob', 'gender', 'admissionDate', 'evaluationPeriod', 'facilityName']
-        },
-        evaluationItems: {
-            type: Type.ARRAY,
-            items: {
-                type: Type.OBJECT,
-                properties: {
-                    metric: { type: Type.STRING, description: "평가지표명" },
-                    grade: { type: Type.STRING, enum: ['우수', '양호', '불량', '해당없음', '자료 누락'], description: "평가 등급" },
-                    reason: { type: Type.STRING, description: "등급 산정 사유" },
-                    evidence: { type: Type.STRING, description: "판단의 근거가 된 문서 내용 또는 파일명" },
-                },
-                required: ['metric', 'grade', 'reason', 'evidence']
-            }
-        },
-        crossCheckResults: {
-            type: Type.ARRAY,
-            items: {
-                type: Type.OBJECT,
-                properties: {
-                    item: { type: Type.STRING, description: "점검 항목" },
-                    status: { type: Type.STRING, description: "점검 결과 상태 (예: 불일치, 확인 필요)" },
-                    recommendation: { type: Type.STRING, description: "권장 조치 사항" },
-                },
-                required: ['item', 'status', 'recommendation']
-            }
-        },
-        aiSummary: {
-            type: Type.STRING,
-            description: "AI가 분석한 종합 요약. 강점과 개선점을 포함하며, 중요한 부분은 마크다운(**text**)으로 강조."
-        }
-    },
-    required: ['basicInfo', 'evaluationItems', 'crossCheckResults', 'aiSummary']
-};
+// Fix: Initialize the GoogleGenAI client as per guidelines, using an API key from environment variables.
+const ai = new GoogleGenAI({apiKey: process.env.API_KEY!});
 
+let chat: Chat | null = null;
 
-const buildPrompt = (guidelineFiles: GuidelineFile[], evaluationFiles: GuidelineFile[]): string => {
-    const guidelinesContent = guidelineFiles.map(f => `### 지침 파일: ${f.name}\n\n\`\`\`\n${f.content}\n\`\`\``).join('\n\n');
-    const evaluationContent = evaluationFiles.map(f => `### 평가 자료 파일: ${f.name}\n\n\`\`\`\n${f.content}\n\`\`\``).join('\n\n');
+const buildReportGenerationPrompt = (guidelines: GuidelineFile[], evaluationFiles: GuidelineFile[]): string => {
+    const guidelineContent = guidelines.map(f => `### ${f.name}\n\n${f.content}`).join('\n\n---\n\n');
+    const evaluationContent = evaluationFiles.map(f => `### ${f.name}\n\n${f.content}`).join('\n\n---\n\n');
 
     return `
-# AI 장기요양평가 보고서 생성 요청
+# 장기요양 평가 AI 분석 요청
 
-## 분석 목표
-당신은 장기요양기관 평가 전문가 AI입니다. 제공된 '평가 지침'을 기준으로 '평가 대상 자료'를 면밀히 분석하여, 요청된 JSON 형식에 맞춰 종합적인 평가 보고서를 생성해야 합니다. 모든 텍스트는 한국어로 작성해주세요.
+## 1. 평가 기준 지침 파일 내용
+${guidelineContent}
 
-## 평가 지침
-${guidelinesContent}
-
-## 평가 대상 자료
+## 2. 분석 대상 평가 자료 내용
 ${evaluationContent}
 
-## 생성할 보고서 내용 및 요청사항
-1.  **기본 정보 (basicInfo)**: 평가 대상 자료에서 이름, 생년월일, 성별, 입소일, 퇴소일, 평가기간, 시설명 등 기본 정보를 정확히 추출하세요. 퇴소일이 없는 경우 null 값을 사용하세요.
-2.  **세부 평가항목 (evaluationItems)**: '평가 지침'에 명시된 각 평가지표에 따라 '평가 대상 자료'를 분석하세요. 각 지표에 대해 '우수', '양호', '불량', '해당없음', '자료 누락' 중 하나의 등급을 부여하고, 명확한 사유와 근거(어떤 문서의 어떤 내용인지)를 제시하세요.
-3.  **교차 점검 결과 (crossCheckResults)**: 여러 문서에 걸쳐 있는 정보들을 비교하여 불일치하거나 모순되는 점이 있는지 확인하세요. 발견된 경우, 해당 항목과 상태(예: 불일치), 그리고 권장 조치를 명시하세요.
-4.  **AI 종합 요약 (aiSummary)**: 전체 분석 결과를 바탕으로 종합적인 요약 보고서를 생성하세요. 주요 강점과 개선이 필요한 영역을 명확히 구분하여 설명하고, 중요한 키워드나 문장은 마크다운 형식(**text**)으로 강조해주세요.
+## 3. 분석 요청 사항
+위의 '평가 기준 지침'과 '분석 대상 평가 자료'를 바탕으로, 다음의 JSON 형식에 맞춰 "2026년 장기요양기관 재가급여(주간보호) 평가" 보고서를 생성해주세요.
 
-**출력 형식**: 아래에 정의된 JSON 스키마를 엄격히 준수하여 결과를 반환해야 합니다. 다른 설명 없이 JSON 객체만 출력해주세요.
+**JSON 출력 형식:**
+{
+  "basicInfo": {
+    "name": "수급자 성명",
+    "dob": "생년월일 (YYYY-MM-DD)",
+    "gender": "성별 (남/여)",
+    "admissionDate": "입소일 (YYYY-MM-DD)",
+    "dischargeDate": "퇴소일 (YYYY-MM-DD 또는 null)",
+    "evaluationPeriod": "평가 기간 (YYYY-MM-DD ~ YYYY-MM-DD)",
+    "facilityName": "시설명"
+  },
+  "evaluationItems": [
+    {
+      "metric": "평가지표명 (예: 급여제공계획의 수립 및 안내)",
+      "grade": "평가 등급 ('우수', '양호', '불량', '해당없음', '자료 누락')",
+      "reason": "등급 산정의 구체적인 이유",
+      "evidence": "판단의 근거가 된 문서와 내용 요약"
+    }
+  ],
+  "crossCheckResults": [
+    {
+      "item": "교차 점검 항목 (예: 급여제공계획과 실제 제공 기록의 일치 여부)",
+      "status": "점검 결과 (예: '일치', '불일치', '확인 필요')",
+      "recommendation": "개선 권장 사항"
+    }
+  ],
+  "aiSummary": "종합적인 AI 분석 요약. Markdown 형식을 사용하여 주요 사항을 강조해주세요. (예: **주요 개선점**)"
+}
+
+**주의사항:**
+- 모든 필드는 반드시 채워져야 합니다. 정보가 없는 경우 "정보 없음" 또는 "해당 없음"으로 표기해주세요.
+- 평가는 제공된 '2026년 장기요양기관 재가급여(주간보호) 평가 매뉴얼'을 기준으로 엄격하게 진행해주세요.
+- 'evaluationItems' 배열에는 매뉴얼의 모든 평가지표에 대한 결과를 포함해야 합니다.
+- 'aiSummary'는 전문가적인 견해를 담아 구체적이고 실행 가능한 제안을 포함해야 합니다.
+- 응답은 반드시 JSON 객체만 포함해야 하며, 다른 텍스트나 설명은 추가하지 마세요.
 `;
-};
+}
 
+/**
+ * Generates a report by analyzing guideline and evaluation files using the Gemini API.
+ */
+// Fix: Implemented generateReport function to call the Gemini API.
+export const generateReport = async (guidelines: GuidelineFile[], evaluationFiles: GuidelineFile[]): Promise<ReportData> => {
+    const prompt = buildReportGenerationPrompt(guidelines, evaluationFiles);
 
-export const generateReport = async (guidelineFiles: GuidelineFile[], evaluationFiles: GuidelineFile[]): Promise<ReportData> => {
-    const prompt = buildPrompt(guidelineFiles, evaluationFiles);
+    // Fix: Use the recommended model 'gemini-2.5-flash' for text tasks.
+    const model = 'gemini-2.5-flash';
+
+    // Fix: Define a response schema for consistent and typed JSON output.
+    const responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+            basicInfo: {
+                type: Type.OBJECT,
+                properties: {
+                    name: { type: Type.STRING },
+                    dob: { type: Type.STRING },
+                    gender: { type: Type.STRING },
+                    admissionDate: { type: Type.STRING },
+                    dischargeDate: { type: Type.STRING, nullable: true },
+                    evaluationPeriod: { type: Type.STRING },
+                    facilityName: { type: Type.STRING },
+                },
+                required: ['name', 'dob', 'gender', 'admissionDate', 'evaluationPeriod', 'facilityName']
+            },
+            evaluationItems: {
+                type: Type.ARRAY,
+                items: {
+                    type: Type.OBJECT,
+                    properties: {
+                        metric: { type: Type.STRING },
+                        grade: { type: Type.STRING, enum: ['우수', '양호', '불량', '해당없음', '자료 누락'] },
+                        reason: { type: Type.STRING },
+                        evidence: { type: Type.STRING }
+                    },
+                    required: ['metric', 'grade', 'reason', 'evidence']
+                }
+            },
+            crossCheckResults: {
+                type: Type.ARRAY,
+                items: {
+                    type: Type.OBJECT,
+                    properties: {
+                        item: { type: Type.STRING },
+                        status: { type: Type.STRING },
+                        recommendation: { type: Type.STRING }
+                    },
+                    required: ['item', 'status', 'recommendation']
+                }
+            },
+            aiSummary: {
+                type: Type.STRING
+            }
+        },
+        required: ['basicInfo', 'evaluationItems', 'crossCheckResults', 'aiSummary']
+    };
 
     try {
+        // Fix: Call generateContent with the correct parameters, including a config for JSON response.
         const response = await ai.models.generateContent({
-            // Per guidelines, use 'gemini-2.5-flash' for general text tasks.
-            model: "gemini-2.5-flash",
+            model: model,
             contents: prompt,
             config: {
-                // Per guidelines, use responseMimeType and responseSchema for JSON output.
-                responseMimeType: "application/json",
-                responseSchema: reportSchema,
-                temperature: 0.2, // A lower temperature for more deterministic, fact-based output
-            },
+                responseMimeType: 'application/json',
+                responseSchema: responseSchema,
+                temperature: 0.2,
+            }
         });
         
-        // Per guidelines, the simplest and most direct way to get the generated text content is by accessing the .text property
-        const jsonText = response.text;
-        
-        if (!jsonText) {
-             throw new Error("AI 응답이 비어있습니다. 입력 파일의 내용을 확인해주세요.");
-        }
-        
-        // The response should be a JSON string, parse it.
+        // Fix: Extract text from the response and parse it as JSON.
+        const jsonText = response.text.trim();
         const reportData: ReportData = JSON.parse(jsonText);
         return reportData;
     } catch (error) {
         console.error("Error generating report with Gemini API:", error);
-        // Provide a more user-friendly error message
         if (error instanceof Error) {
-            if(error.message.includes('API key')) {
-                 throw new Error("Gemini API 키가 유효하지 않거나 설정되지 않았습니다. 환경 변수를 확인해주세요.");
-            }
+             throw new Error(`AI 보고서 생성 중 오류가 발생했습니다: ${error.message}`);
         }
-        throw new Error("AI 보고서 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
+        throw new Error("AI 보고서 생성 중 알 수 없는 오류가 발생했습니다.");
     }
-};
+}
 
+const buildChatSystemInstruction = (reportData: ReportData): string => {
+    const reportJsonString = JSON.stringify(reportData, null, 2);
+    return `
+You are an expert AI assistant specialized in analyzing Long-Term Care Evaluation Reports for daycare centers in South Korea, based on the 2026 standards.
+Your role is to answer questions about the provided report.
+You must base your answers STRICTLY on the content of the report provided below. Do not invent information or refer to external knowledge.
+If a question cannot be answered from the report, state that the information is not available in the provided document.
+Be concise, clear, and professional in your responses.
+When asked about specific evaluation items, refer to the metric, grade, and reason from the report.
 
-// Module-level variable to hold the chat session
-let chatSession: Chat | undefined;
-
-export const startChat = (reportData: ReportData) => {
-    const reportSummary = JSON.stringify(reportData, null, 2);
-    const systemInstruction = `
-You are an AI assistant specialized in analyzing long-term care evaluation reports for facilities in South Korea.
-You will be answering questions about a specific report that has already been generated.
-The full report data is provided below for your reference.
-Base all your answers strictly on the information contained within this report. Do not invent information.
-If the user asks something that cannot be answered from the report, state that the information is not available in the provided data.
-The report is written in Korean, so all your responses must also be in Korean.
-
-Here is the report data:
+Here is the report data in JSON format:
 \`\`\`json
-${reportSummary}
+${reportJsonString}
 \`\`\`
 `;
+}
 
-    // Per guidelines, use ai.chats.create to start a chat.
-    chatSession = ai.chats.create({
-        // Per guidelines, use 'gemini-2.5-flash' for general text tasks.
-        model: 'gemini-2.5-flash',
+/**
+ * Starts a new chat session pre-loaded with the report data as context.
+ */
+// Fix: Implemented startChat function to initialize a new chat session.
+export const startChat = (reportData: ReportData) => {
+    const model = 'gemini-2.5-flash';
+    const systemInstruction = buildChatSystemInstruction(reportData);
+
+    // Fix: Create a new chat session using ai.chats.create with a system instruction.
+    chat = ai.chats.create({
+        model: model,
         config: {
             systemInstruction: systemInstruction,
-        },
+        }
     });
 };
 
+/**
+ * Sends a user's question to the ongoing chat session and returns the AI's answer.
+ */
+// Fix: Implemented askQuestion function to send messages in the active chat.
 export const askQuestion = async (question: string): Promise<string> => {
-    if (!chatSession) {
-        throw new Error("Chat session not started. Please call startChat first.");
+    if (!chat) {
+        throw new Error("Chat is not initialized. Call startChat first.");
     }
-    
     try {
-        // Per guidelines, use chat.sendMessage to send a message.
-        const response: GenerateContentResponse = await chatSession.sendMessage({ message: question });
-
-        // Per guidelines, access the .text property for the response.
+        // Fix: Send a message to the chat session using chat.sendMessage.
+        const response = await chat.sendMessage({ message: question });
+        // Fix: Return the text from the response as per guidelines.
         return response.text;
     } catch (error) {
-        console.error("Error asking question with Gemini API:", error);
-        return "죄송합니다, 질문에 답변하는 중 오류가 발생했습니다.";
+        console.error("Error sending message to Gemini API:", error);
+        if (error instanceof Error) {
+            return `질문에 답변하는 중 오류가 발생했습니다: ${error.message}`;
+        }
+        return "질문에 답변하는 중 알 수 없는 오류가 발생했습니다.";
     }
 };
