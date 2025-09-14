@@ -1,15 +1,18 @@
 import { GoogleGenAI, Chat, Type, GenerateContentResponse } from '@google/genai';
 import type { GuidelineFile, ReportData } from '../types';
 
-// FIX: Initialize GoogleGenAI with the API key from environment variables as per guidelines.
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Use Vite's standard way to access environment variables for deployment
+const apiKey = import.meta.env.VITE_API_KEY;
 
-// FIX: Use the 'gemini-2.5-flash' model as specified in the guidelines.
+if (!apiKey) {
+    throw new Error("API_KEY is not set in the environment.");
+}
+
+const ai = new GoogleGenAI({ apiKey });
 const model = 'gemini-2.5-flash';
 
 let chat: Chat;
 
-// Defines the JSON structure the AI should return for the report.
 const reportSchema = {
   type: Type.OBJECT,
   properties: {
@@ -59,7 +62,6 @@ const reportSchema = {
   required: ['basicInfo', 'evaluationItems', 'crossCheckResults', 'aiSummary']
 };
 
-
 const buildFileContentString = (files: GuidelineFile[]): string => {
     return files.map(file => `
 --- FILE START: ${file.name} ---
@@ -95,18 +97,16 @@ export const generateReport = async (
     `;
 
     try {
-        // FIX: Use the correct method `ai.models.generateContent` as per guidelines.
         const response = await ai.models.generateContent({
             model: model,
             contents: prompt,
             config: {
                 responseMimeType: 'application/json',
                 responseSchema: reportSchema,
-                temperature: 0.1, // 낮게 설정하여 일관성 있는 결과 유도
+                temperature: 0.1,
             },
         });
         
-        // FIX: Extract text directly from response object as per guidelines.
         const jsonText = response.text.trim();
 
         if (!jsonText) {
@@ -131,7 +131,6 @@ export const startChat = (reportData: ReportData) => {
         ${JSON.stringify(reportData)}
     `;
     
-    // FIX: Use ai.chats.create to start a new chat session as per guidelines.
     chat = ai.chats.create({
       model: model,
       config: {
@@ -145,9 +144,7 @@ export const askQuestion = async (question: string): Promise<string> => {
         return "오류: 챗 세션이 초기화되지 않았습니다. 새로운 분석을 시작해주세요.";
     }
     try {
-        // FIX: Use chat.sendMessage to send a message as per guidelines.
         const response: GenerateContentResponse = await chat.sendMessage({ message: question });
-        // FIX: Extract text directly from response object as per guidelines.
         return response.text;
     } catch (error) {
         console.error("Chat API 호출 중 오류 발생:", error);
