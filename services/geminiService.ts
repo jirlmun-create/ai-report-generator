@@ -1,9 +1,17 @@
 import { GoogleGenAI, Chat, GenerateContentResponse, Type } from "@google/genai";
 import type { ReportData, GuidelineFile } from '../types';
 
-// For deployment, Vite will replace `import.meta.env.VITE_API_KEY`.
-// In the AI Studio dev environment, `process.env.API_KEY` will be used.
-const apiKey = (import.meta.env.VITE_API_KEY || process.env.API_KEY);
+// This robust check ensures the API key is sourced correctly in any environment.
+// It first checks for Vite's `import.meta.env` (for deployment)
+// and falls back to `process.env` (for the AI Studio dev environment).
+let apiKey: string | undefined;
+if (typeof import.meta !== 'undefined' && import.meta.env) {
+    apiKey = import.meta.env.VITE_API_KEY;
+}
+if (!apiKey && typeof process !== 'undefined' && process.env) {
+    apiKey = process.env.API_KEY;
+}
+
 
 if (!apiKey) {
     throw new Error("API_KEY is not set. Please configure it in your environment secrets.");
