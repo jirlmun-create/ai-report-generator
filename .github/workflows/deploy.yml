@@ -1,0 +1,55 @@
+# GitHub Actions의 이름
+name: Deploy to GitHub Pages
+
+# 언제 이 Action을 실행할 것인지 정의
+on:
+  push:
+    branches:
+      - main  # main 브랜치에 코드가 푸시될 때마다 실행
+
+# 어떤 권한을 부여할 것인지 정의
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 어떤 작업(Job)을 할 것인지 정의
+jobs:
+  build:
+    runs-on: ubuntu-latest # 최신 우분투 환경에서 실행
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # 코드를 내려받음
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4 # Node.js 환경 설정
+        with:
+          node-version: '20' # Node.js 20 버전 사용
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install # package.json에 명시된 라이브러리 설치
+
+      - name: Build project
+        run: npm run build # Vite를 사용해 프로젝트를 빌드
+        env:
+          VITE_API_KEY: ${{ secrets.VITE_API_KEY }} # 3단계에서 저장한 비밀 API 키를 빌드 과정에 주입
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5 # GitHub Pages 설정
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3 # 빌드 결과물을 업로드
+        with:
+          path: './dist' # 빌드 결과물이 있는 dist 폴더 지정
+
+  deploy:
+    needs: build # build 작업이 성공해야 실행됨
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }} # 배포된 URL
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4 # 최종적으로 배포
