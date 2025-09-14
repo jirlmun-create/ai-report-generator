@@ -1,35 +1,33 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { AppState, GuidelineFile, ReportData } from './types';
+import { readFileContent } from './utils/fileReader';
+import { getGuidelinesFromDB, saveGuidelinesToDB, clearGuidelinesFromDB } from './utils/db';
+import { analyzeDocuments } from './services/geminiService';
+
 import GuidelineUpload from './components/GuidelineUpload';
 import FileUpload from './components/FileUpload';
 import ProcessingView from './components/ProcessingView';
 import ReportView from './components/ReportView';
-import { generateReport } from './services/geminiService';
-import { readFileContent } from './utils/fileReader';
-import { getGuidelinesFromDB, saveGuidelinesToDB, clearGuidelinesFromDB } from './utils/db';
 
 const App: React.FC = () => {
     const [appState, setAppState] = useState<AppState>(AppState.Idle);
-    const [guidelinesSubmitted, setGuidelinesSubmitted] = useState(false);
     const [guidelineFiles, setGuidelineFiles] = useState<GuidelineFile[]>([]);
     const [reportData, setReportData] = useState<ReportData | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [processingStatus, setProcessingStatus] = useState<string>('');
+    const [currentStep, setCurrentStep] = useState<'guidelines' | 'evaluation'>('guidelines');
 
-    // For processing view
-    const [progress, setProgress] = useState(0);
-    const [progressMessage, setProgressMessage] = useState('');
-
-    // Load guidelines from IndexedDB on initial render
     useEffect(() => {
+        // Load guidelines from IndexedDB on startup
         const loadGuidelines = async () => {
             try {
                 const storedFiles = await getGuidelinesFromDB();
                 if (storedFiles.length > 0) {
                     setGuidelineFiles(storedFiles);
-                    setGuidelinesSubmitted(true);
+                    setCurrentStep('evaluation');
                 }
             } catch (err) {
-                console.error("Failed to load guidelines from DB", err);
+                console.error("Failed to load guidelines from DB:", err);
             }
         };
         loadGuidelines();
@@ -43,12 +41,9 @@ const App: React.FC = () => {
                     content: await readFileContent(file)
                 }))
             );
-            setGuidelineFiles(prevFiles => {
-                const existingNames = new Set(prevFiles.map(f => f.name));
-                const uniqueNewFiles = newFiles.filter(f => !existingNames.has(f.name));
-                const updatedFiles = [...prevFiles, ...uniqueNewFiles];
-                saveGuidelinesToDB(updatedFiles); // Persist to DB
-                return updatedFiles;
+            setGuidelineFiles(prev => {
+                const uniqueNewFiles = newFiles.filter(nf => !prev.some(pf => pf.name === nf.name));
+                return [...prev, ...uniqueNewFiles];
             });
         } catch (e) {
             setError("파일을 읽는 중 오류가 발생했습니다.");
@@ -57,116 +52,114 @@ const App: React.FC = () => {
     }, []);
 
     const handleRemoveGuidelineFile = useCallback((fileName: string) => {
-        setGuidelineFiles(prevFiles => {
-            const updatedFiles = prevFiles.filter(f => f.name !== fileName);
-            saveGuidelinesToDB(updatedFiles); // Update DB
-            return updatedFiles;
-        });
+        setGuidelineFiles(prev => prev.filter(f => f.name !== fileName));
     }, []);
 
-    const handleNextStep = () => {
+    const handleNextStep = async () => {
         if (guidelineFiles.length > 0) {
-            setGuidelinesSubmitted(true);
+            await saveGuidelinesToDB(guidelineFiles);
+            setCurrentStep('evaluation');
         }
     };
 
-    const handleChangeGuidelines = () => {
-        setGuidelinesSubmitted(false);
+    const handleChangeGuidelines = async () => {
+        await clearGuidelinesFromDB();
+        setGuidelineFiles([]);
+        setCurrentStep('guidelines');
     };
 
     const handleAnalysisSubmit = async (evaluationFiles: GuidelineFile[]) => {
-        setAppState(AppState.Processing);
         setError(null);
-        setReportData(null);
-        setProgress(0);
-        setProgressMessage('Initializing analysis...');
-
-        const onProgress = (prog: number, msg: string) => {
-            setProgress(prog);
-            setProgressMessage(msg);
-        };
-        
+        setAppState(AppState.Processing);
+        setProcessingStatus("분석을 준비하고 있습니다...");
         try {
-            const data = await generateReport(guidelineFiles, evaluationFiles, onProgress);
-            setReportData(data);
+            const result = await analyzeDocuments(guidelineFiles, evaluationFiles, setProcessingStatus);
+            setReportData(result);
             setAppState(AppState.Report);
-        } catch (err: any) {
+        } catch (err) {
             console.error(err);
-            setError(err.message || 'An unknown error occurred during analysis.');
+            const errorMessage = err instanceof Error ? err.message : '알 수 없는 오류가 발생했습니다.';
+            setError(errorMessage);
             setAppState(AppState.Error);
         }
     };
-
-    const handleFullReset = async () => {
-        await clearGuidelinesFromDB();
-        setGuidelineFiles([]);
+    
+    const handleReset = () => {
+        setAppState(AppState.Idle);
         setReportData(null);
         setError(null);
-        setProgress(0);
-        setProgressMessage('');
-        setGuidelinesSubmitted(false);
-        setAppState(AppState.Idle);
-    }
+        // We keep the guidelines loaded for convenience
+        setCurrentStep('evaluation'); 
+    };
 
     const renderContent = () => {
-        switch (appState) {
-            case AppState.Idle:
-                return guidelinesSubmitted ? (
-                    <FileUpload
-                        guidelineFiles={guidelineFiles}
-                        onAnalysisSubmit={handleAnalysisSubmit}
-                        onChangeGuidelines={handleChangeGuidelines}
-                    />
-                ) : (
-                    <GuidelineUpload
-                        guidelineFiles={guidelineFiles}
-                        onAddFiles={handleAddGuidelineFiles}
-                        onRemoveFile={handleRemoveGuidelineFile}
-                        onNextStep={handleNextStep}
-                    />
-                );
-            case AppState.Processing:
-                return <ProcessingView progress={progress} message={progressMessage} />;
-            case AppState.Report:
-                if (!reportData) {
-                    return (
-                        <div className="text-center text-red-500">
-                            <h2>Error</h2>
-                            <p>Report data is missing. Please start over.</p>
-                            <button onClick={handleFullReset} className="mt-4 px-4 py-2 bg-blue-600 text-white rounded">Start Over</button>
-                        </div>
-                    );
-                }
-                return <ReportView reportData={reportData} onReset={handleFullReset} />;
-            case AppState.Error:
-                return (
-                    <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-2xl mx-auto border border-red-300 text-center">
-                        <h2 className="text-2xl font-bold text-red-600 mb-4">Analysis Failed</h2>
-                        <p className="text-gray-700 mb-6">{error || 'An unexpected error occurred.'}</p>
-                        <button
-                            onClick={handleFullReset}
-                            className="px-6 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700"
-                        >
-                            Try Again
-                        </button>
-                    </div>
-                );
-            default:
-                return <div>Invalid state</div>;
+        if (appState === AppState.Error) {
+            return (
+                <div className="text-center p-8 bg-white rounded-xl shadow-lg border border-red-300">
+                    <h2 className="text-2xl font-bold text-red-700 mb-4">오류 발생</h2>
+                    <p className="text-red-600 mb-6">{error}</p>
+                    <button
+                        onClick={handleReset}
+                        className="px-6 py-2 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 transition-colors"
+                    >
+                        다시 시도하기
+                    </button>
+                </div>
+            );
         }
+
+        if (appState === AppState.Processing) {
+            return <ProcessingView statusMessage={processingStatus} />;
+        }
+
+        if (appState === AppState.Report && reportData) {
+            return <ReportView reportData={reportData} onReset={handleReset} />;
+        }
+
+        // Idle state
+        if (currentStep === 'guidelines') {
+             return (
+                <GuidelineUpload
+                    guidelineFiles={guidelineFiles}
+                    onAddFiles={handleAddGuidelineFiles}
+                    onRemoveFile={handleRemoveGuidelineFile}
+                    onNextStep={handleNextStep}
+                />
+             );
+        }
+
+        if (currentStep === 'evaluation') {
+            return (
+                <FileUpload 
+                    guidelineFiles={guidelineFiles}
+                    onAnalysisSubmit={handleAnalysisSubmit}
+                    onChangeGuidelines={handleChangeGuidelines}
+                />
+            );
+        }
+        
+        return null; // Should not happen
     };
 
     return (
-        <div className="bg-gray-50 min-h-screen p-4 sm:p-8 font-sans">
-            <header className="max-w-5xl mx-auto mb-8 text-center">
-                <h1 className="text-4xl font-extrabold text-gray-800 tracking-tight">AI 장기요양 평가 보고서 생성기</h1>
-                <p className="mt-2 text-lg text-gray-500">주간보호센터 2026년 평가 대비</p>
+        <div className="bg-gray-50 min-h-screen font-sans">
+            <header className="bg-white shadow-sm print:hidden">
+                <div className="max-w-7xl mx-auto py-4 px-4 sm:px-6 lg:px-8">
+                    <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        AI 장기요양 평가 보고서 생성기
+                    </h1>
+                </div>
             </header>
-            <main>
-                {renderContent()}
+            <main className="py-10">
+                <div className="max-w-7xl mx-auto sm:px-6 lg:px-8">
+                    {renderContent()}
+                </div>
             </main>
-            <footer className="max-w-5xl mx-auto mt-12 text-center text-xs text-gray-400">
-                <p>&copy; {new Date().getFullYear()}. For demonstration purposes only. Verify all AI-generated content.</p>
+            <footer className="text-center py-4 text-sm text-gray-500 print:hidden">
+                <p>&copy; 2024 AI Report Generator. All rights reserved.</p>
             </footer>
         </div>
     );
