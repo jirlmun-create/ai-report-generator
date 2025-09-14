@@ -1,13 +1,19 @@
 import { GoogleGenAI, Chat, Type } from "@google/genai";
 import { GuidelineFile, ReportData } from '../types';
 
-// This file was created to implement the Gemini API service, resolving module not found errors.
-// It provides functions to generate a report from documents and to chat about the report.
+// For Vite deployment (like GitHub Pages), environment variables are accessed via import.meta.env
+// The VITE_ prefix is required by Vite for security reasons.
+// The GitHub Action workflow will inject the secret API key into this variable during the build process.
+const apiKey = import.meta.env.VITE_API_KEY;
 
-// Fix: Initialize the GoogleGenAI client as per guidelines, using an API key from environment variables.
-const ai = new GoogleGenAI({apiKey: process.env.API_KEY!});
+if (!apiKey) {
+    throw new Error("VITE_API_KEY is not set in the environment.");
+}
+
+const ai = new GoogleGenAI({apiKey: apiKey});
 
 let chat: Chat | null = null;
+
 
 const buildReportGenerationPrompt = (guidelines: GuidelineFile[], evaluationFiles: GuidelineFile[]): string => {
     const guidelineContent = guidelines.map(f => `### ${f.name}\n\n${f.content}`).join('\n\n---\n\n');
@@ -63,17 +69,25 @@ ${evaluationContent}
 `;
 }
 
+
 /**
  * Generates a report by analyzing guideline and evaluation files using the Gemini API.
  */
-// Fix: Implemented generateReport function to call the Gemini API.
 export const generateReport = async (guidelines: GuidelineFile[], evaluationFiles: GuidelineFile[]): Promise<ReportData> => {
-    const prompt = buildReportGenerationPrompt(guidelines, evaluationFiles);
+    
+    const guidelineContent = guidelines.map(f => `### 지침 파일명: ${f.name}\n\n${f.content}`).join('\n\n---\n\n');
+    const evaluationContent = evaluationFiles.map(f => `### 분석 자료명: ${f.name}\n\n${f.content}`).join('\n\n---\n\n');
 
-    // Fix: Use the recommended model 'gemini-2.5-flash' for text tasks.
+    const systemInstruction = `당신은 대한민국 장기요양기관 평가 전문가입니다. 당신의 임무는 제공된 '평가 기준 지침'을 유일한 규칙으로 삼아, '분석 대상 평가 자료'를 분석하는 것입니다. 분석 결과는 반드시 지정된 JSON 형식으로만 출력해야 합니다. 당신의 기존 지식은 사용하지 마십시오. 만약 지침에 명시된 항목이 평가 자료에서 발견되지 않으면, 'grade'를 '자료 누락'으로 표기하고 그 사실을 'reason'에 명시해야 합니다.
+    
+    ---
+    [평가 기준 지침]
+    ${guidelineContent}
+    ---
+    `;
+
     const model = 'gemini-2.5-flash';
 
-    // Fix: Define a response schema for consistent and typed JSON output.
     const responseSchema = {
         type: Type.OBJECT,
         properties: {
@@ -123,25 +137,24 @@ export const generateReport = async (guidelines: GuidelineFile[], evaluationFile
     };
 
     try {
-        // Fix: Call generateContent with the correct parameters, including a config for JSON response.
         const response = await ai.models.generateContent({
             model: model,
-            contents: prompt,
+            contents: evaluationContent,
             config: {
+                systemInstruction: systemInstruction,
                 responseMimeType: 'application/json',
                 responseSchema: responseSchema,
                 temperature: 0.2,
             }
         });
         
-        // Fix: Extract text from the response and parse it as JSON.
         const jsonText = response.text.trim();
         const reportData: ReportData = JSON.parse(jsonText);
         return reportData;
     } catch (error) {
         console.error("Error generating report with Gemini API:", error);
         if (error instanceof Error) {
-             throw new Error(`AI 보고서 생성 중 오류가 발생했습니다: ${error.message}`);
+             throw new Error(`AI 보고서 생성에 실패했습니다. 입력 파일이나 API 키를 확인해주세요.`);
         }
         throw new Error("AI 보고서 생성 중 알 수 없는 오류가 발생했습니다.");
     }
@@ -164,15 +177,11 @@ ${reportJsonString}
 `;
 }
 
-/**
- * Starts a new chat session pre-loaded with the report data as context.
- */
-// Fix: Implemented startChat function to initialize a new chat session.
+
 export const startChat = (reportData: ReportData) => {
     const model = 'gemini-2.5-flash';
     const systemInstruction = buildChatSystemInstruction(reportData);
 
-    // Fix: Create a new chat session using ai.chats.create with a system instruction.
     chat = ai.chats.create({
         model: model,
         config: {
@@ -181,18 +190,13 @@ export const startChat = (reportData: ReportData) => {
     });
 };
 
-/**
- * Sends a user's question to the ongoing chat session and returns the AI's answer.
- */
-// Fix: Implemented askQuestion function to send messages in the active chat.
+
 export const askQuestion = async (question: string): Promise<string> => {
     if (!chat) {
         throw new Error("Chat is not initialized. Call startChat first.");
     }
     try {
-        // Fix: Send a message to the chat session using chat.sendMessage.
         const response = await chat.sendMessage({ message: question });
-        // Fix: Return the text from the response as per guidelines.
         return response.text;
     } catch (error) {
         console.error("Error sending message to Gemini API:", error);
