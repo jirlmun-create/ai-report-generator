@@ -1,147 +1,168 @@
-import React, { useState, useEffect } from 'react';
-import { AppState, GuidelineFile, ReportData } from './types';
+import React, { useState, useEffect, useCallback } from 'react';
 import GuidelineUpload from './components/GuidelineUpload';
 import FileUpload from './components/FileUpload';
 import ProcessingView from './components/ProcessingView';
 import ReportView from './components/ReportView';
+import { GuidelineFile, ReportData } from './types';
+import { readFileContent } from './utils/fileReader';
 import { generateReport } from './services/geminiService';
 import { getGuidelinesFromDB, saveGuidelinesToDB, clearGuidelinesFromDB } from './utils/db';
-import { readFileContent } from './utils/fileReader';
 
 const App: React.FC = () => {
-  const [appState, setAppState] = useState<AppState>(AppState.Idle);
-  const [guidelineFiles, setGuidelineFiles] = useState<GuidelineFile[]>([]);
-  const [reportData, setReportData] = useState<ReportData | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string>('');
-  const [showFileUpload, setShowFileUpload] = useState(false);
+    const [view, setView] = useState<'guideline' | 'evaluation' | 'processing' | 'report' | 'error'>('guideline');
+    const [guidelineFiles, setGuidelineFiles] = useState<GuidelineFile[]>([]);
+    const [reportData, setReportData] = useState<ReportData | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    // Check for saved guidelines in IndexedDB on initial load
-    const loadGuidelines = async () => {
-      try {
-        const savedFiles = await getGuidelinesFromDB();
-        if (savedFiles.length > 0) {
-          setGuidelineFiles(savedFiles);
-          setShowFileUpload(true); // If guidelines exist, skip to the next step
+    useEffect(() => {
+        getGuidelinesFromDB()
+            .then(files => {
+                if (files.length > 0) {
+                    setGuidelineFiles(files);
+                    setView('evaluation');
+                } else {
+                    setView('guideline');
+                }
+            })
+            .catch(err => {
+                console.error("Failed to load guidelines from DB:", err);
+                setView('guideline');
+            })
+            .finally(() => setIsLoading(false));
+    }, []);
+
+    const handleAddGuidelineFiles = useCallback(async (files: File[]) => {
+        try {
+            const newFiles = await Promise.all(
+                files.map(async file => ({
+                    name: file.name,
+                    content: await readFileContent(file)
+                }))
+            );
+            setGuidelineFiles(prevFiles => {
+                const uniqueFiles = [...prevFiles];
+                newFiles.forEach(nf => {
+                    if (!uniqueFiles.some(uf => uf.name === nf.name)) {
+                        uniqueFiles.push(nf);
+                    }
+                });
+                saveGuidelinesToDB(uniqueFiles);
+                return uniqueFiles;
+            });
+        } catch (e) {
+            setError("파일을 읽는 중 오류가 발생했습니다.");
+            console.error(e);
         }
-      } catch (error) {
-        console.error("Failed to load guidelines from DB:", error);
-      }
+    }, []);
+    
+    const handleRemoveGuidelineFile = (fileName: string) => {
+        setGuidelineFiles(prevFiles => {
+            const updatedFiles = prevFiles.filter(f => f.name !== fileName);
+            saveGuidelinesToDB(updatedFiles);
+            return updatedFiles;
+        });
     };
-    loadGuidelines();
-  }, []);
+    
+    const handleNextFromGuidelines = () => {
+        if (guidelineFiles.length > 0) {
+            setView('evaluation');
+        }
+    };
 
-  const handleAddGuidelineFiles = async (files: File[]) => {
-    try {
-      const newFileContents = await Promise.all(
-        files.map(async file => ({
-          name: file.name,
-          content: await readFileContent(file)
-        }))
-      );
-      const updatedFiles = [...guidelineFiles, ...newFileContents];
-      setGuidelineFiles(updatedFiles);
-      await saveGuidelinesToDB(updatedFiles);
-    } catch (e) {
-      setErrorMessage("파일을 읽는 중 오류가 발생했습니다.");
-      setAppState(AppState.Error);
-      console.error(e);
-    }
-  };
+    const handleAnalysisSubmit = async (evaluationFiles: GuidelineFile[]) => {
+        setView('processing');
+        setError(null);
+        try {
+            const data = await generateReport(guidelineFiles, evaluationFiles);
+            setReportData(data);
+            setView('report');
+        } catch (e) {
+            const errorMessage = e instanceof Error ? e.message : "알 수 없는 오류가 발생했습니다.";
+            setError(errorMessage);
+            setView('error');
+        }
+    };
 
-  const handleRemoveGuidelineFile = async (fileName: string) => {
-    const updatedFiles = guidelineFiles.filter(f => f.name !== fileName);
-    setGuidelineFiles(updatedFiles);
-    await saveGuidelinesToDB(updatedFiles);
-  };
+    const handleReset = () => {
+        clearGuidelinesFromDB().then(() => {
+            setGuidelineFiles([]);
+            setReportData(null);
+            setError(null);
+            setView('guideline');
+        });
+    };
+    
+    const handleChangeGuidelines = () => {
+        setView('guideline');
+    };
 
-  const handleNextStep = () => {
-    setShowFileUpload(true);
-  };
-  
-  const handleChangeGuidelines = () => {
-    setShowFileUpload(false);
-  };
+    const renderContent = () => {
+        if (isLoading) {
+            return (
+                <div className="flex justify-center items-center h-screen">
+                    <div className="text-center p-8">
+                        <p className="text-lg text-gray-600">설정 정보를 불러오는 중...</p>
+                    </div>
+                </div>
+            );
+        }
 
-  const handleAnalysisSubmit = async (evaluationFiles: GuidelineFile[]) => {
-    setAppState(AppState.Processing);
-    try {
-      const data = await generateReport(guidelineFiles, evaluationFiles);
-      setReportData(data);
-      setAppState(AppState.Report);
-    } catch (error: any) {
-      console.error(error);
-      setErrorMessage(error.message || "보고서 생성 중 알 수 없는 오류가 발생했습니다.");
-      setAppState(AppState.Error);
-    }
-  };
-  
-  const handleReset = async () => {
-    setAppState(AppState.Idle);
-    setGuidelineFiles([]);
-    setReportData(null);
-    setErrorMessage('');
-    setShowFileUpload(false);
-    await clearGuidelinesFromDB();
-  };
+        switch (view) {
+            case 'guideline':
+                return <GuidelineUpload
+                            guidelineFiles={guidelineFiles}
+                            onAddFiles={handleAddGuidelineFiles}
+                            onRemoveFile={handleRemoveGuidelineFile}
+                            onNextStep={handleNextFromGuidelines}
+                        />;
+            case 'evaluation':
+                return <FileUpload
+                            guidelineFiles={guidelineFiles}
+                            onAnalysisSubmit={handleAnalysisSubmit}
+                            onChangeGuidelines={handleChangeGuidelines}
+                        />;
+            case 'processing':
+                return <ProcessingView />;
+            case 'report':
+                // FIX: Check for reportData before rendering ReportView to prevent rendering with null data.
+                return reportData ? <ReportView reportData={reportData} onReset={handleReset} /> : null;
+            case 'error':
+                 return (
+                    <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-2xl mx-auto border border-red-300 text-center">
+                        <h2 className="text-2xl font-bold text-red-700 mb-4">오류 발생</h2>
+                        <p className="text-red-600 bg-red-50 p-4 rounded-md mb-6">{error}</p>
+                        <button
+                            onClick={handleReset}
+                            className="w-full bg-blue-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors"
+                        >
+                            새로운 분석 시작하기
+                        </button>
+                    </div>
+                );
+            default:
+                return <div>잘못된 애플리케이션 상태입니다.</div>;
+        }
+    };
 
-  const renderContent = () => {
-    switch (appState) {
-      case AppState.Processing:
-        return <ProcessingView />;
-      case AppState.Report:
-        return reportData && <ReportView reportData={reportData} onReset={handleReset} />;
-      case AppState.Error:
-        return (
-          <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-2xl mx-auto border border-red-200 text-center">
-            <h2 className="text-2xl font-bold text-red-600 mb-4">오류 발생</h2>
-            <p className="text-gray-700 mb-6">{errorMessage}</p>
-            <button
-              onClick={handleReset}
-              className="px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700"
-            >
-              처음으로 돌아가기
-            </button>
-          </div>
-        );
-      case AppState.Idle:
-      default:
-        return showFileUpload ? (
-          <FileUpload
-            guidelineFiles={guidelineFiles}
-            onAnalysisSubmit={handleAnalysisSubmit}
-            onChangeGuidelines={handleChangeGuidelines}
-          />
-        ) : (
-          <GuidelineUpload
-            guidelineFiles={guidelineFiles}
-            onAddFiles={handleAddGuidelineFiles}
-            onRemoveFile={handleRemoveGuidelineFile}
-            onNextStep={handleNextStep}
-          />
-        );
-    }
-  };
-
-  return (
-    <div className="bg-gray-50 min-h-screen p-4 sm:p-8 flex flex-col items-center">
-      <header className="text-center mb-8">
-        <h1 className="text-4xl font-extrabold text-gray-800">장기요양 평가 AI 분석기</h1>
-        <p className="text-gray-600 mt-2">
-            2026년 주간보호 평가 기준에 따라 평가 자료를 분석하고 보고서를 생성합니다.
-        </p>
-      </header>
-      <main className="w-full">
-        {renderContent()}
-      </main>
-      <footer className="text-center mt-8 text-gray-500 text-sm print:hidden">
-        <p>&copy; 2024 AI Report Generator. All rights reserved.</p>
-        <p className="mt-1">
-            본 서비스는 AI를 활용한 분석 보조 도구이며, 최종 검토 및 책임은 사용자에게 있습니다.
-        </p>
-      </footer>
-    </div>
-  );
+    return (
+        <div className="bg-gray-50 min-h-screen py-10 px-4 sm:px-6 lg:px-8 font-sans">
+            <header className="max-w-5xl mx-auto mb-8 text-center">
+                <h1 className="text-4xl font-extrabold text-gray-800 tracking-tight">
+                    AI 장기요양 평가 보고서 생성기
+                </h1>
+                <p className="mt-3 text-lg text-gray-500">
+                    평가 지침과 관련 서류를 업로드하여 AI 분석 보고서를 자동으로 생성하세요.
+                </p>
+            </header>
+            <main>
+                {renderContent()}
+            </main>
+            <footer className="text-center mt-12 text-sm text-gray-500">
+                <p>&copy; {new Date().getFullYear()} AI Report Generator. All rights reserved.</p>
+            </footer>
+        </div>
+    );
 };
 
 export default App;

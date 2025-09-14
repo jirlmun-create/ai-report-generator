@@ -1,153 +1,161 @@
-import { GoogleGenAI, Chat, Type, GenerateContentResponse } from '@google/genai';
-import type { GuidelineFile, ReportData } from '../types';
+import { GoogleGenAI, Chat, Type, GenerateContentResponse } from "@google/genai";
+import { GuidelineFile, ReportData } from '../types';
 
-// Use Vite's standard way to access environment variables for deployment
-const apiKey = import.meta.env.VITE_API_KEY;
-
-if (!apiKey) {
-    throw new Error("API_KEY is not set in the environment.");
-}
-
-const ai = new GoogleGenAI({ apiKey });
+// Initialize the Gemini AI model.
+// The API key must be provided via the process.env.API_KEY environment variable.
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const model = 'gemini-2.5-flash';
 
-let chat: Chat;
+let chat: Chat | null = null;
 
-const reportSchema = {
-  type: Type.OBJECT,
-  properties: {
-    basicInfo: {
-      type: Type.OBJECT,
-      properties: {
-        name: { type: Type.STRING, description: "수급자 성명" },
-        dob: { type: Type.STRING, description: "수급자 생년월일 (YYYY-MM-DD)" },
-        gender: { type: Type.STRING, description: "수급자 성별 (남/여)" },
-        admissionDate: { type: Type.STRING, description: "시설 입소일 (YYYY-MM-DD)" },
-        dischargeDate: { type: Type.STRING, nullable: true, description: "시설 퇴소일 (YYYY-MM-DD), 없으면 null" },
-        evaluationPeriod: { type: Type.STRING, description: "평가 대상 기간 (YYYY-MM-DD ~ YYYY-MM-DD)" },
-        facilityName: { type: Type.STRING, description: "시설명" },
-      },
-      required: ['name', 'dob', 'gender', 'admissionDate', 'evaluationPeriod', 'facilityName']
-    },
-    evaluationItems: {
-      type: Type.ARRAY,
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          metric: { type: Type.STRING, description: "평가 지표명" },
-          grade: { type: Type.STRING, description: "평가 등급 (우수, 양호, 불량, 해당없음, 자료 누락 중 하나)" },
-          reason: { type: Type.STRING, description: "해당 등급을 받은 구체적인 사유" },
-          evidence: { type: Type.STRING, description: "판단의 근거가 된 문서나 기록 내용" },
-        },
-        required: ['metric', 'grade', 'reason', 'evidence']
-      }
-    },
-    crossCheckResults: {
-        type: Type.ARRAY,
-        items: {
-            type: Type.OBJECT,
-            properties: {
-                item: { type: Type.STRING, description: "교차점검 항목 (예: 급여제공의 적정성)" },
-                status: { type: Type.STRING, description: "점검 결과 (예: 일부 불일치 확인)" },
-                recommendation: { type: Type.STRING, description: "개선 권고 사항" },
-            },
-            required: ['item', 'status', 'recommendation']
-        }
-    },
-    aiSummary: { 
-        type: Type.STRING, 
-        description: "보고서 전체 내용을 요약한 종합의견. Markdown 형식을 사용하여 주요 내용을 강조해주세요. (예: **주요 개선점**)" 
-    },
-  },
-  required: ['basicInfo', 'evaluationItems', 'crossCheckResults', 'aiSummary']
-};
-
-const buildFileContentString = (files: GuidelineFile[]): string => {
-    return files.map(file => `
---- FILE START: ${file.name} ---
-${file.content}
---- FILE END: ${file.name} ---
-`).join('\n');
-};
-
+/**
+ * Generates a comprehensive report by analyzing guideline and evaluation files.
+ * @param guidelineFiles - Array of files containing evaluation guidelines.
+ * @param evaluationFiles - Array of files containing evaluation data.
+ * @returns A promise that resolves to the generated ReportData.
+ */
 export const generateReport = async (
     guidelineFiles: GuidelineFile[],
     evaluationFiles: GuidelineFile[]
 ): Promise<ReportData> => {
-    const guidelineContent = buildFileContentString(guidelineFiles);
-    const evaluationContent = buildFileContentString(evaluationFiles);
+    const guidelineContent = guidelineFiles.map(f => `### 지침 파일: ${f.name}\n\n${f.content}`).join('\n\n---\n\n');
+    const evaluationContent = evaluationFiles.map(f => `### 평가 자료 파일: ${f.name}\n\n${f.content}`).join('\n\n---\n\n');
+
+    const systemInstruction = `
+You are an expert AI assistant specializing in long-term care facility evaluations in South Korea.
+Your task is to analyze the provided documents based on the given guidelines and generate a comprehensive evaluation report.
+The report must be in JSON format and adhere strictly to the provided JSON schema.
+- Analyze all provided documents: guidelines and evaluation materials.
+- Identify the resident's basic information.
+- Evaluate each metric defined in the guidelines.
+- For each metric, provide a grade ('우수', '양호', '불량', '해당없음', '자료 누락'), a reason, and cite the evidence from the documents.
+- Perform a cross-check based on legal and guideline requirements.
+- Provide a final AI summary of the evaluation.
+- All text in the report should be in Korean.
+- The evaluation year is 2026.
+`;
 
     const prompt = `
-        당신은 장기요양기관 평가를 전문으로 하는 AI 컨설턴트입니다.
-        당신의 임무는 제공된 '평가 지침 파일'과 '평가 자료 파일'을 면밀히 분석하여, 2026년 기준의 '장기요양 평가 AI 분석 보고서'를 JSON 형식으로 생성하는 것입니다.
+Please generate a long-term care evaluation report based on the following documents.
 
-        **지침:**
-        1.  **기본 정보 추출:** '평가 자료 파일'에서 수급자의 기본 정보를 정확히 추출하여 'basicInfo' 객체를 채워주세요. 정보가 없으면 "정보 없음"으로 기재하세요.
-        2.  **세부 지표 평가:** '평가 지침 파일'의 각 항목을 기준으로 '평가 자료 파일'의 내용을 평가하여 'evaluationItems' 배열을 완성하세요. 각 항목에 대해 '우수', '양호', '불량', '해당없음', '자료 누락' 중 하나의 등급을 부여하고, 구체적인 사유와 근거를 명시해야 합니다. 지침에 있는 모든 평가지표를 포함해야 합니다.
-        3.  **교차 점검:** 법령 및 규정 준수 여부, 서류 간 내용 일치 여부 등을 확인하여 'crossCheckResults' 배열을 작성하세요. 문제가 발견된 경우, 개선 권고 사항을 포함해야 합니다.
-        4.  **종합 요약:** 분석 결과를 바탕으로 전반적인 평가와 주요 개선점을 요약하여 'aiSummary'를 작성하세요. 중요한 부분은 Markdown의 bold체(\`**\`)를 사용하여 강조해주세요.
-        5.  **정확성:** 반드시 제공된 파일의 내용에만 근거하여 분석하고, 추측이나 외부 정보는 배제해야 합니다.
-        6.  **출력 형식:** 반드시 지정된 JSON 스키마를 준수하여 결과를 반환해야 합니다.
+## 평가 지침 (Guidelines)
+${guidelineContent}
 
-        --- 평가 지침 파일 내용 ---
-        ${guidelineContent}
-        
-        --- 평가 자료 파일 내용 ---
-        ${evaluationContent}
-    `;
+## 평가 자료 (Evaluation Documents)
+${evaluationContent}
+
+Generate the report in JSON format according to the specified schema.
+`;
+
+    const responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+            basicInfo: {
+                type: Type.OBJECT,
+                properties: {
+                    name: { type: Type.STRING, description: "수급자 성명 (Resident's Name)" },
+                    dob: { type: Type.STRING, description: "생년월일 (Date of Birth), YYYY-MM-DD format" },
+                    gender: { type: Type.STRING, description: "성별 (Gender), '남' or '여'" },
+                    admissionDate: { type: Type.STRING, description: "입소일 (Admission Date), YYYY-MM-DD format" },
+                    dischargeDate: { type: Type.STRING, description: "퇴소일 (Discharge Date), YYYY-MM-DD format, or null if not applicable" },
+                    evaluationPeriod: { type: Type.STRING, description: "평가 기간 (Evaluation Period)" },
+                    facilityName: { type: Type.STRING, description: "시설명 (Facility Name)" },
+                },
+            },
+            evaluationItems: {
+                type: Type.ARRAY,
+                items: {
+                    type: Type.OBJECT,
+                    properties: {
+                        metric: { type: Type.STRING, description: "평가 지표 (Evaluation Metric)" },
+                        grade: { type: Type.STRING, description: "평가 등급 ('우수', '양호', '불량', '해당없음', '자료 누락')" },
+                        reason: { type: Type.STRING, description: "평가 사유 (Reason for the grade)" },
+                        evidence: { type: Type.STRING, description: "근거 자료 (Evidence from the documents)" },
+                    },
+                },
+            },
+            crossCheckResults: {
+                type: Type.ARRAY,
+                items: {
+                    type: Type.OBJECT,
+                    properties: {
+                        item: { type: Type.STRING, description: "점검 항목 (Cross-check item)" },
+                        status: { type: Type.STRING, description: "점검 결과 상태 (Status of the check)" },
+                        recommendation: { type: Type.STRING, description: "권고 사항 (Recommendation)" },
+                    },
+                },
+            },
+            aiSummary: {
+                type: Type.STRING,
+                description: "AI 종합 분석 요약 (Overall AI summary). Use markdown for formatting, like using ** for bolding key phrases."
+            },
+        },
+    };
 
     try {
-        const response = await ai.models.generateContent({
+        const response: GenerateContentResponse = await ai.models.generateContent({
             model: model,
             contents: prompt,
             config: {
-                responseMimeType: 'application/json',
-                responseSchema: reportSchema,
-                temperature: 0.1,
+                systemInstruction: systemInstruction,
+                responseMimeType: "application/json",
+                responseSchema: responseSchema,
+                temperature: 0.2,
             },
         });
         
         const jsonText = response.text.trim();
-
-        if (!jsonText) {
-            throw new Error("AI로부터 빈 응답을 받았습니다.");
-        }
+        const reportData: ReportData = JSON.parse(jsonText);
         
-        return JSON.parse(jsonText) as ReportData;
-
+        return reportData;
     } catch (error) {
-        console.error("Gemini API 호출 중 오류 발생:", error);
-        throw new Error("AI 보고서 생성에 실패했습니다. 입력 파일이나 API 키를 확인해주세요.");
+        console.error("Error generating report with Gemini:", error);
+        if (error instanceof Error) {
+            throw new Error(`AI 분석 중 오류가 발생했습니다: ${error.message}`);
+        }
+        throw new Error("AI 분석 중 알 수 없는 오류가 발생했습니다.");
     }
 };
 
+/**
+ * Initializes a chat session with the context of a generated report.
+ * @param reportData - The report data to be used as context for the chat.
+ */
 export const startChat = (reportData: ReportData) => {
-    const systemInstruction = `
-        당신은 방금 생성된 장기요양기관 평가 보고서에 대해 답변하는 전문 AI 챗봇입니다.
-        주어진 보고서 데이터를 기반으로만 사용자의 질문에 친절하고 정확하게 답변해주세요.
-        보고서에 없는 내용은 추측하지 말고, 정보가 없다고 솔직하게 말해야 합니다.
-        
-        보고서 내용:
-        ${JSON.stringify(reportData)}
-    `;
+    const fullReportContext = `
+You are a helpful AI assistant. You will answer questions about the following long-term care evaluation report.
+The report is for the year 2026.
+Do not provide information that is not present in the report.
+All your answers must be in Korean.
+
+--- BEGIN REPORT DATA ---
+${JSON.stringify(reportData, null, 2)}
+--- END REPORT DATA ---
+`;
     
     chat = ai.chats.create({
-      model: model,
-      config: {
-        systemInstruction: systemInstruction,
-      },
+        model: model,
+        config: {
+            systemInstruction: fullReportContext,
+        },
     });
 };
 
+/**
+ * Sends a user's question to the ongoing chat session and gets a response.
+ * @param question - The user's question.
+ * @returns A promise that resolves to the AI's response string.
+ */
 export const askQuestion = async (question: string): Promise<string> => {
     if (!chat) {
-        return "오류: 챗 세션이 초기화되지 않았습니다. 새로운 분석을 시작해주세요.";
+        throw new Error("Chat is not initialized. Call startChat first.");
     }
+
     try {
         const response: GenerateContentResponse = await chat.sendMessage({ message: question });
         return response.text;
     } catch (error) {
-        console.error("Chat API 호출 중 오류 발생:", error);
-        return "질문에 답변하는 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.";
+        console.error("Error sending message to Gemini:", error);
+        return "죄송합니다. 질문에 답변하는 중 오류가 발생했습니다.";
     }
 };
