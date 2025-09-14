@@ -1,168 +1,188 @@
-import { GoogleGenAI, Chat, Type, GenerateContentResponse } from "@google/genai";
+import { GoogleGenAI, Chat, GenerateContentResponse, Type } from "@google/genai";
 import { GuidelineFile, ReportData } from '../types';
+import { sleep } from '../utils/sleep';
+import { chunkText } from "../utils/chunker";
 
-// Vite/production environment uses import.meta.env
-// The development environment (AI Studio) uses process.env
-const apiKey = import.meta.env.VITE_API_KEY || process.env.API_KEY;
+// For Vite deployment, environment variables are accessed via import.meta.env
+const apiKey = import.meta.env.VITE_API_KEY;
 
 if (!apiKey) {
-    throw new Error("API_KEY is not set in the environment.");
+    throw new Error("VITE_API_KEY is not set in the environment variables.");
 }
 
 const ai = new GoogleGenAI({ apiKey });
-const model = 'gemini-2.5-flash';
+const modelName = 'gemini-2.5-flash';
 
 let chat: Chat | null = null;
 
-/**
- * Generates a comprehensive report by analyzing guideline and evaluation files.
- * @param guidelineFiles - Array of files containing evaluation guidelines.
- * @param evaluationFiles - Array of files containing evaluation data.
- * @returns A promise that resolves to the generated ReportData.
- */
+const formatFilesForPrompt = (files: GuidelineFile[]): string => {
+    if (files.length === 0) {
+        return "No files provided.\n";
+    }
+    return files.map(file => `[File: ${file.name}]\n${file.content}\n\n`).join('');
+};
+
+
+export const summarizeTextChunk = async (guidelineContent: string, chunk: string): Promise<string> => {
+    const systemInstruction = `You are an AI assistant that summarizes document chunks based on evaluation guidelines.
+- The user will provide evaluation guidelines and a chunk of a document.
+- Your task is to extract and list only the key points from the chunk that are directly relevant to the provided guidelines.
+- Be concise and focus on facts, figures, and policy statements.
+- The output must be in Korean.`;
+
+    const userPrompt = `--- Evaluation Guidelines ---\n${guidelineContent}\n\n--- Document Chunk to Summarize ---\n${chunk}`;
+
+    try {
+        const response = await ai.models.generateContent({
+            model: modelName,
+            contents: userPrompt,
+            config: {
+                systemInstruction,
+                temperature: 0.0,
+            }
+        });
+        return response.text;
+    } catch (error) {
+        console.error("Error summarizing chunk:", error);
+        // Return a specific message that can be filtered out later if needed
+        return "Failed to summarize chunk.";
+    }
+};
+
+
 export const generateReport = async (
     guidelineFiles: GuidelineFile[],
-    evaluationFiles: GuidelineFile[]
+    summarizedContent: string, // Changed from evaluationFiles to summarizedContent
+    onProgress: (progress: number, message: string) => void
 ): Promise<ReportData> => {
-    const guidelineContent = guidelineFiles.map(f => `### 지침 파일: ${f.name}\n\n${f.content}`).join('\n\n---\n\n');
-    const evaluationContent = evaluationFiles.map(f => `### 평가 자료 파일: ${f.name}\n\n${f.content}`).join('\n\n---\n\n');
+    onProgress(85, '종합 보고서 생성 중...');
 
-    const systemInstruction = `
-You are an expert AI assistant specializing in long-term care facility evaluations in South Korea for Day/Night Care Centers ('주간보호').
-Your task is to analyze the provided evaluation documents based ONLY on the provided guideline documents and generate a comprehensive evaluation report.
-The report MUST be in JSON format and adhere strictly to the provided JSON schema.
-- Your entire analysis MUST be based *exclusively* on the content of the "평가 지침 (Guidelines)" provided. Do not use any external knowledge.
-- Cross-reference the "평가 자료 (Evaluation Documents)" against the criteria found in the "평가 지침 (Guidelines)".
-- If information for a specific metric is not found in the evaluation documents, you MUST grade it as '자료 누락' (Data Missing).
-- Identify the resident's basic information from the evaluation documents.
-- For each metric, provide a grade ('우수', '양호', '불량', '해당없음', '자료 누락'), a reason, and cite the evidence from the documents.
-- Perform a cross-check based on legal and guideline requirements mentioned in the provided guideline files.
-- Provide a final AI summary of the evaluation.
-- All text in the report should be in Korean.
-- The evaluation year is 2026.
-`;
+    const guidelineContent = formatFilesForPrompt(guidelineFiles);
 
-    const prompt = `
-Please generate a long-term care evaluation report based on the following documents.
+    const systemInstruction = `You are an expert AI assistant specializing in South Korea's long-term care insurance evaluations for day care centers. Your task is to analyze summarized documents against evaluation guidelines and generate a detailed, structured report in JSON format.
+    
+    - The year of evaluation is 2026.
+    - Analyze the 'Summarized Evaluation Documents' based on the 'Evaluation Guidelines'.
+    - If the summary for a topic is missing or insufficient, mark the grade as '자료 누락' (Data Missing).
+    - Fill in all fields of the JSON schema accurately.
+    - 'grade' can only be one of: '우수' (Excellent), '양호' (Good), '불량' (Poor), '해당없음' (Not Applicable), '자료 누락' (Data Missing).
+    - Provide concise, factual reasons and cite evidence from the summaries.
+    - The cross-check should identify inconsistencies based on the provided summaries.
+    - The AI summary should be a professional, high-level overview of the findings.
+    - All output must be in Korean.
+    - Ensure the final output is a single, valid JSON object that strictly adheres to the provided schema. Do not include any markdown formatting like \`\`\`json.
+    `;
 
-## 평가 지침 (Guidelines)
-${guidelineContent}
-
-## 평가 자료 (Evaluation Documents)
-${evaluationContent}
-
-Generate the report in JSON format according to the specified schema.
-`;
+    const userPrompt = `--- Evaluation Guidelines ---\n${guidelineContent}\n\n--- Summarized Evaluation Documents ---\n${summarizedContent}\n\nPlease generate the final report.`;
 
     const responseSchema = {
-        type: Type.OBJECT,
-        properties: {
-            basicInfo: {
-                type: Type.OBJECT,
-                properties: {
-                    name: { type: Type.STRING, description: "수급자 성명 (Resident's Name)" },
-                    dob: { type: Type.STRING, description: "생년월일 (Date of Birth), YYYY-MM-DD format" },
-                    gender: { type: Type.STRING, description: "성별 (Gender), '남' or '여'" },
-                    admissionDate: { type: Type.STRING, description: "입소일 (Admission Date), YYYY-MM-DD format" },
-                    dischargeDate: { type: Type.STRING, description: "퇴소일 (Discharge Date), YYYY-MM-DD format, or null if not applicable" },
-                    evaluationPeriod: { type: Type.STRING, description: "평가 기간 (Evaluation Period)" },
-                    facilityName: { type: Type.STRING, description: "시설명 (Facility Name)" },
-                },
-            },
-            evaluationItems: {
-                type: Type.ARRAY,
-                items: {
-                    type: Type.OBJECT,
-                    properties: {
-                        metric: { type: Type.STRING, description: "평가 지표 (Evaluation Metric)" },
-                        grade: { type: Type.STRING, description: "평가 등급 ('우수', '양호', '불량', '해당없음', '자료 누락')" },
-                        reason: { type: Type.STRING, description: "평가 사유 (Reason for the grade)" },
-                        evidence: { type: Type.STRING, description: "근거 자료 (Evidence from the documents)" },
-                    },
-                },
-            },
-            crossCheckResults: {
-                type: Type.ARRAY,
-                items: {
-                    type: Type.OBJECT,
-                    properties: {
-                        item: { type: Type.STRING, description: "점검 항목 (Cross-check item)" },
-                        status: { type: Type.STRING, description: "점검 결과 상태 (Status of the check)" },
-                        recommendation: { type: Type.STRING, description: "권고 사항 (Recommendation)" },
-                    },
-                },
-            },
-            aiSummary: {
-                type: Type.STRING,
-                description: "AI 종합 분석 요약 (Overall AI summary). Use markdown for formatting, like using ** for bolding key phrases."
-            },
+      type: Type.OBJECT,
+      properties: {
+        basicInfo: {
+          type: Type.OBJECT,
+          properties: {
+            name: { type: Type.STRING, description: "수급자 성명 (Recipient Name)" },
+            dob: { type: Type.STRING, description: "생년월일 (Date of Birth)" },
+            gender: { type: Type.STRING, description: "성별 (Gender)" },
+            admissionDate: { type: Type.STRING, description: "입소일 (Admission Date)" },
+            dischargeDate: { type: Type.STRING, description: "퇴소일 (Discharge Date), can be null" },
+            evaluationPeriod: { type: Type.STRING, description: "평가기간 (Evaluation Period)" },
+            facilityName: { type: Type.STRING, description: "시설명 (Facility Name)" },
+          },
+          required: ["name", "dob", "gender", "admissionDate", "evaluationPeriod", "facilityName"]
         },
+        evaluationItems: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              metric: { type: Type.STRING, description: "평가지표 (Evaluation Metric)" },
+              grade: { type: Type.STRING, description: "등급 ('우수', '양호', '불량', '해당없음', '자료 누락')" },
+              reason: { type: Type.STRING, description: "평가 사유 (Reason for grade)" },
+              evidence: { type: Type.STRING, description: "근거 자료 (Evidence, e.g., summary point)" },
+            },
+            required: ["metric", "grade", "reason", "evidence"]
+          }
+        },
+        crossCheckResults: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              item: { type: Type.STRING, description: "교차점검 항목 (Cross-check item)" },
+              status: { type: Type.STRING, description: "점검 결과 (Status, e.g., '일치', '불일치', '확인 불가')" },
+              recommendation: { type: Type.STRING, description: "개선 권고 사항 (Recommendation)" },
+            },
+            required: ["item", "status", "recommendation"]
+          }
+        },
+        aiSummary: {
+          type: Type.STRING,
+          description: "AI 종합 분석 요약 (AI Summary). Use markdown for formatting, like **bolding**."
+        }
+      },
+      required: ["basicInfo", "evaluationItems", "crossCheckResults", "aiSummary"]
     };
 
     try {
         const response: GenerateContentResponse = await ai.models.generateContent({
-            model: model,
-            contents: { parts: [{ text: prompt }] },
+            model: modelName,
+            contents: userPrompt,
             config: {
-                systemInstruction: { parts: [{ text: systemInstruction }] },
+                systemInstruction: systemInstruction,
                 responseMimeType: "application/json",
                 responseSchema: responseSchema,
                 temperature: 0.2,
             },
         });
+        onProgress(95, 'AI 응답 파싱 중...');
         
         const jsonText = response.text.trim();
-        const reportData: ReportData = JSON.parse(jsonText);
+        const reportData = JSON.parse(jsonText);
         
-        return reportData;
-    } catch (error) {
-        console.error("Error generating report with Gemini:", error);
-        if (error instanceof Error) {
-            throw new Error(`AI 분석 중 오류가 발생했습니다: ${error.message}`);
+        if (!reportData.basicInfo || !reportData.evaluationItems) {
+            throw new Error("AI response is missing required fields.");
         }
-        throw new Error("AI 분석 중 알 수 없는 오류가 발생했습니다.");
+
+        onProgress(100, '보고서 생성 완료!');
+        await sleep(500);
+        
+        return reportData as ReportData;
+
+    } catch (error: any) {
+        console.error("Error generating final report:", error);
+        // Provide more detailed error information if available
+        const errorMessage = error.details ? JSON.stringify(error.details) : error.message;
+        throw new Error(`AI 분석 중 오류가 발생했습니다: ${errorMessage}`);
     }
 };
 
-/**
- * Initializes a chat session with the context of a generated report.
- * @param reportData - The report data to be used as context for the chat.
- */
-export const startChat = (reportData: ReportData) => {
-    const fullReportContext = `
-You are a helpful AI assistant. You will answer questions about the following long-term care evaluation report.
-The report is for the year 2026.
-Do not provide information that is not present in the report.
-All your answers must be in Korean.
 
---- BEGIN REPORT DATA ---
-${JSON.stringify(reportData, null, 2)}
---- END REPORT DATA ---
-`;
-    
+export const startChat = (reportData: ReportData) => {
+    const reportContext = JSON.stringify(reportData, null, 2);
+    const systemInstruction = `You are a helpful AI assistant. You are now in a Q&A session about a report you just generated. The full report is provided below as context. Answer questions based only on this report. Be concise and helpful. All responses must be in Korean.
+
+<report_context>
+${reportContext}
+</report_context>`;
+
     chat = ai.chats.create({
-        model: model,
+        model: modelName,
         config: {
-            systemInstruction: fullReportContext,
-        },
+            systemInstruction: systemInstruction,
+        }
     });
 };
 
-/**
- * Sends a user's question to the ongoing chat session and gets a response.
- * @param question - The user's question.
- * @returns A promise that resolves to the AI's response string.
- */
 export const askQuestion = async (question: string): Promise<string> => {
     if (!chat) {
-        throw new Error("Chat is not initialized. Call startChat first.");
+        return "채팅 세션이 시작되지 않았습니다. 먼저 보고서를 생성해주세요.";
     }
-
     try {
         const response: GenerateContentResponse = await chat.sendMessage({ message: question });
         return response.text;
     } catch (error) {
-        console.error("Error sending message to Gemini:", error);
-        return "죄송합니다. 질문에 답변하는 중 오류가 발생했습니다.";
+        console.error("Error asking question:", error);
+        return "질문에 답변하는 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.";
     }
 };
