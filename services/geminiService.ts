@@ -1,9 +1,15 @@
 import { GoogleGenAI, Chat, Type, GenerateContentResponse } from "@google/genai";
 import { GuidelineFile, ReportData } from '../types';
 
-// Initialize the Gemini AI model.
-// The API key must be provided via the process.env.API_KEY environment variable.
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Vite/production environment uses import.meta.env
+// The development environment (AI Studio) uses process.env
+const apiKey = import.meta.env.VITE_API_KEY || process.env.API_KEY;
+
+if (!apiKey) {
+    throw new Error("API_KEY is not set in the environment.");
+}
+
+const ai = new GoogleGenAI({ apiKey });
 const model = 'gemini-2.5-flash';
 
 let chat: Chat | null = null;
@@ -22,14 +28,15 @@ export const generateReport = async (
     const evaluationContent = evaluationFiles.map(f => `### 평가 자료 파일: ${f.name}\n\n${f.content}`).join('\n\n---\n\n');
 
     const systemInstruction = `
-You are an expert AI assistant specializing in long-term care facility evaluations in South Korea.
-Your task is to analyze the provided documents based on the given guidelines and generate a comprehensive evaluation report.
-The report must be in JSON format and adhere strictly to the provided JSON schema.
-- Analyze all provided documents: guidelines and evaluation materials.
-- Identify the resident's basic information.
-- Evaluate each metric defined in the guidelines.
+You are an expert AI assistant specializing in long-term care facility evaluations in South Korea for Day/Night Care Centers ('주간보호').
+Your task is to analyze the provided evaluation documents based ONLY on the provided guideline documents and generate a comprehensive evaluation report.
+The report MUST be in JSON format and adhere strictly to the provided JSON schema.
+- Your entire analysis MUST be based *exclusively* on the content of the "평가 지침 (Guidelines)" provided. Do not use any external knowledge.
+- Cross-reference the "평가 자료 (Evaluation Documents)" against the criteria found in the "평가 지침 (Guidelines)".
+- If information for a specific metric is not found in the evaluation documents, you MUST grade it as '자료 누락' (Data Missing).
+- Identify the resident's basic information from the evaluation documents.
 - For each metric, provide a grade ('우수', '양호', '불량', '해당없음', '자료 누락'), a reason, and cite the evidence from the documents.
-- Perform a cross-check based on legal and guideline requirements.
+- Perform a cross-check based on legal and guideline requirements mentioned in the provided guideline files.
 - Provide a final AI summary of the evaluation.
 - All text in the report should be in Korean.
 - The evaluation year is 2026.
@@ -95,9 +102,9 @@ Generate the report in JSON format according to the specified schema.
     try {
         const response: GenerateContentResponse = await ai.models.generateContent({
             model: model,
-            contents: prompt,
+            contents: { parts: [{ text: prompt }] },
             config: {
-                systemInstruction: systemInstruction,
+                systemInstruction: { parts: [{ text: systemInstruction }] },
                 responseMimeType: "application/json",
                 responseSchema: responseSchema,
                 temperature: 0.2,
